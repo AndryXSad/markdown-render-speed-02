@@ -1,26 +1,17 @@
-// Driver for the make.fun markdown-render-speed-02 bounty.
-//
-// Reads every case from $MAKEFUN_INPUT_DIR/cases.json (default /input),
-// renders each case's markdown with parse() from ./parse.js, and writes
-// the resulting HTML strings, in input order, to
-// $MAKEFUN_OUTPUT_DIR/html.json (default /output) as a JSON array.
-// The input file holds either a bare array of { id, markdown } objects
-// or an object with a `cases` array; a case without a markdown string
-// renders as an empty string. Only Node built-ins are used besides
-// ./parse.js, and the output is deterministic.
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
 import { parse } from './parse.js';
 
-const inDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
-const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const inputDir = process.env.MAKEFUN_INPUT_DIR || '/input';
+const outputDir = process.env.MAKEFUN_OUTPUT_DIR || '/output';
 
-const parsed = JSON.parse(readFileSync(join(inDir, 'cases.json'), 'utf8'));
-const list = Array.isArray(parsed) ? parsed : parsed.cases;
+const raw = readFileSync(inputDir + '/cases.json', 'utf8');
+const data = JSON.parse(raw);
+const cases = Array.isArray(data) ? data : data.cases;
 
-const out = list.map((entry) =>
-  parse(typeof entry.markdown === 'string' ? entry.markdown : ''),
-);
+const out = cases.map((c) => {
+  const md = typeof c === 'string' ? c : (c.markdown ?? c.input ?? '');
+  return parse(md);
+});
 
-mkdirSync(outDir, { recursive: true });
-writeFileSync(join(outDir, 'html.json'), JSON.stringify(out));
+mkdirSync(outputDir, { recursive: true });
+writeFileSync(outputDir + '/html.json', JSON.stringify(out));
