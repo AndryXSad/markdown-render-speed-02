@@ -582,8 +582,8 @@ function inlineParse(text, refs) {
     if (l && l.t === 0 && !l.raw) l.s += s;
     else nodes.push({ t: 0, s });
   }
-  function pushDelim(ch, len, canOpen, canClose) {
-    const d = { t: 2, ch, len, orig: len, canOpen, canClose, opens: [], closes: [], linkId: null, id: delims.length };
+  function pushDelim(ch, len, canOpen, canClose, nextCh) {
+    const d = { t: 2, ch, len, orig: len, canOpen, canClose, nextCh: nextCh || '', opens: [], closes: [], linkId: null, id: delims.length };
     nodes.push(d);
     delims.push(d);
   }
@@ -779,7 +779,9 @@ function inlineParse(text, refs) {
       }
       // '~' runs longer than 2 cannot form del; keep them as delimiters of
       // length m but they will only pair when lengths match (1 or 2).
-      pushDelim(c, m, canOpen, canClose);
+      // nextCh (the char after the run) is kept for the emphasis-blocking
+      // rule in resolveEmphasis.
+      pushDelim(c, m, canOpen, canClose, next);
       i += m;
       continue;
     }
@@ -873,9 +875,11 @@ function resolveEmphasis(nodes, delims) {
     if (k > 0) prevOf.set(alive[k], alive[k - 1]);
     if (k < alive.length - 1) nextOf.set(alive[k], alive[k + 1]);
   }
-  // formed emphasis boundaries [openId, closeId]: a delimiter inside one
-  // cannot pair with a delimiter outside it (cm-469, cm-470)
+  // formed emphasis boundaries [openId, closeId, use]: a delimiter inside
+  // one cannot pair with a delimiter outside it (cm-469, cm-470); `use`
+  // (1 = em, 2 = strong) is kept for the blocking rule below
   const formed = [];
+  const wordCh = /[\p{L}\p{N}]/u;
   function insideFormed(id) {
     for (let k = 0; k < formed.length; k++) {
       if (formed[k][0] < id && id < formed[k][1]) return true;
@@ -905,6 +909,24 @@ function resolveEmphasis(nodes, delims) {
             }
           }
         }
+        if (cur.ch !== '~') {
+          // marked quirk (K-rule): an inner pair of a different length
+          // (em vs strong) whose closer is immediately followed by a
+          // letter/digit, and whose opener cannot close, blocks the
+          // outer pair (e.g. `*a **b**c*` stays literal, while
+          // `*a **b** c*`, `*a *b*c*` and `*x**b**c*` all form).
+          // Same-length inner pairs and cross-char pairs do not block.
+          const use0 = (opener.len >= 2 && cur.len >= 2) ? 2 : 1;
+          let blocked = false;
+          for (let k = 0; k < formed.length; k++) {
+            const fp = formed[k];
+            if (fp[0] > opener.id && fp[1] < cur.id && fp[2] !== use0) {
+              const iOp = delims[fp[0]], iCl = delims[fp[1]];
+              if (iOp.ch === cur.ch && !iOp.canClose && wordCh.test(iCl.nextCh)) { blocked = true; break; }
+            }
+          }
+          if (blocked) { opener = prevOf.get(opener); continue; }
+        }
         found = opener;
         break;
       }
@@ -919,7 +941,7 @@ function resolveEmphasis(nodes, delims) {
       }
       found.opens.push({ n: use, ch: found.ch });
       cur.closes.push({ n: use, ch: cur.ch });
-      formed.push([found.id, cur.id]);
+      formed.push([found.id, cur.id, use]);
       found.len -= use;
       cur.len -= use;
       if (found.len === 0) {
@@ -1432,6 +1454,12 @@ function parseBlocks(lines, endsWithNL) {
       else arr.pop();
     } else if (leaf.t === 'html') {
       closeLeafHtml(lastIdx === undefined ? leaf.lastIdx : lastIdx, how || 'container');
+    } else if (leaf.t === 'fence' && par.t === 'item' && !leaf.anchored) {
+      // a fence in a list item that never anchored (no non-blank content
+      // line matched all containers) and never closed keeps none of its
+      // whitespace-only content lines (a closed fence never reaches
+      // here: closing it clears the leaf first)
+      node.lines.length = 0;
     }
     // fence / code need no finalization (pending blanks are dropped)
     leaf = null;
@@ -1448,7 +1476,11 @@ function parseBlocks(lines, endsWithNL) {
     return false;
   }
   function matchItem(cur, fr) {
-    if (curBlank(cur)) return true;
+    // a blank line is inside the item, but the item's indent is still
+    // consumed from it (so a whitespace-only line inside a fenced code
+    // block keeps only its remainder after the item indent, as marked
+    // outdents the item body before lexing it)
+    if (curBlank(cur)) { curSkipWsUpTo(cur, fr.contentIndent); return true; }
     const sv = saveCur(cur);
     if (curSkipWs(cur, fr.contentIndent)) return true;
     restoreCur(cur, sv);
@@ -1480,6 +1512,10 @@ function parseBlocks(lines, endsWithNL) {
     let j = lm.after;
     while (j < content.length && (content[j] === ' ' || content[j] === '\t')) j++;
     if (j >= content.length) return false;
+    // a paragraph directly inside a list item is interrupted by ANY
+    // ordered list marker (marked: `- foo\n  0. bar` starts a nested
+    // list); at top level / in a quote only `1.` interrupts
+    if (leaf && leaf.t === 'para' && leaf.parent && leaf.parent.t === 'item') return true;
     return lm.bullet || lm.num === 1;
   }
   function listContinues(list, lm) {
@@ -1513,6 +1549,7 @@ function parseBlocks(lines, endsWithNL) {
     const cur = { s: lines[li], p: 0, col: 0 };
     // ---- phase 1: match containers (outermost first) ----
     let failAt = -1;
+    let fenceQuoteClose = false; // set when a line is absorbed as fence content past a failing quote
     for (let k = 1; k < stack.length; k++) {
       const fr = stack[k];
       if (fr.t === 'quote') {
@@ -1521,17 +1558,54 @@ function parseBlocks(lines, endsWithNL) {
         if (!matchItem(cur, fr)) { failAt = k; break; }
       }
       // list frames are transparent
-      if (curBlank(cur)) break; // blank line: inside all deeper containers
+      // (no blank-line break here: a blank line must still be offered
+      // to deeper item frames, so they can consume their indent, and
+      // to deeper quote frames, which it fails — a blank line without
+      // '>' ends a quote at any depth)
     }
     if (failAt >= 0) {
-      // a fenced code block's content is literal with respect to LIST
-      // indentation: a line that is not indented enough for its list item
-      // is still fence content (the fence and its containers stay open, so
-      // a later closing fence can still close it). A blockquote failure
-      // (missing '>') still ends the fence, as does a blank line.
-      if (leaf && leaf.t === 'fence' && stack[failAt].t === 'item') {
-        // fall through to phase 2; the fence handler adds the line as content
-      } else {
+      // A fenced code block inside a list item: a line that fails the
+      // item match is fence content ONLY once the fence is anchored (it
+      // already holds a non-blank content line that matched all of its
+      // containers) and only when the line is not a block start (ATX,
+      // hr, fence, blockquote, list marker, HTML block type 1-6).
+      // Before the anchor, or at a block start, the line ends the fence
+      // and the item and is re-processed outside them (so a
+      // closing-fence-looking line opens a NEW fence there). A
+      // setext-looking line (not an hr) is absorbed as content with its
+      // leading spaces raised to max(4, n) (a tab is kept). When the
+      // failing frame is a quote, an absorbed line is the last line of
+      // that quote: the fence closes and the quote pops after it.
+      let fenceFall = false;
+      // a blank line never falls through as fence content here: it ends
+      // the quote (and the fence) instead (a blank line inside a fence
+      // in a bare item never reaches this branch: it matches the item)
+      if (leaf && leaf.t === 'fence' && leaf.parent.t === 'item' && !curBlank(cur)) {
+        const rest = curRest(cur);
+        const hb = matchHtmlBlockStart(rest);
+        const blockStart = !!isHrLine(rest) || !!matchATX(rest) || !!matchFence(rest) || /^ {0,3}>/.test(rest) || !!matchListMarker(rest) || !!(hb && hb.type !== 7);
+        if (leaf.anchored && !blockStart) {
+          const se = matchSetext(rest);
+          if (se) {
+            if (rest[0] === '\t') leaf.node.lines.push(rest);
+            else {
+              let n = 0;
+              while (n < rest.length && rest[n] === ' ') n++;
+              leaf.node.lines.push(' '.repeat(Math.max(4, n)) + rest.slice(n));
+            }
+            if (stack[failAt].t === 'quote') {
+              while (stack.length > failAt + 1) {
+                const fr = stack.pop();
+                if (leaf && leaf.parent === fr) closeLeaf(li - 1, 'container');
+              }
+            }
+            continue;
+          }
+          fenceFall = true;
+          if (stack[failAt].t === 'quote') fenceQuoteClose = true;
+        }
+      }
+      if (!fenceFall) {
       // lazy continuation? (a list marker line inside a list item, or one
       // that continues the open list, is a new item/list, not a lazy line)
       const lazyContent = curRest(cur);
@@ -1604,7 +1678,12 @@ function parseBlocks(lines, endsWithNL) {
         } else {
           const sv = saveCur(cur);
           curSkipWsUpTo(cur, leaf.indent);
-          leaf.node.lines.push(curRest(cur));
+          const pushed = curRest(cur);
+          leaf.node.lines.push(pushed);
+          // the fence is anchored once a non-blank content line arrived
+          // inside all of its containers (a line that failed container
+          // matching never anchors it)
+          if (failAt < 0 && /\S/.test(pushed)) leaf.anchored = true;
           restoreCur(cur, sv);
         }
         break;
@@ -1718,7 +1797,7 @@ function parseBlocks(lines, endsWithNL) {
         const lang = unescapeStr(infoTrim.split(/[ \t]/)[0] || '');
         const node = { t: 'fence', ch: fe.ch, len: fe.len, lang, lines: [] };
         addBlock(top(), node);
-        leaf = { t: 'fence', node, parent: top(), ch: fe.ch, len: fe.len, indent: fe.indent };
+        leaf = { t: 'fence', node, parent: top(), ch: fe.ch, len: fe.len, indent: fe.indent, anchored: false };
         break;
       }
       if (isHrLine(content)) { addBlock(top(), { t: 'hr' }); break; }
@@ -1807,6 +1886,15 @@ function parseBlocks(lines, endsWithNL) {
         break;
       }
     }
+    if (fenceQuoteClose) {
+      // a line absorbed as fence content past a failing quote was the
+      // last line of that quote: close the fence and pop the frames
+      // above the quote (the quote itself stays open)
+      while (stack.length > failAt + 1) {
+        const fr = stack.pop();
+        if (leaf && leaf.parent === fr) closeLeaf(li - 1, 'container');
+      }
+    }
   }
   closeLeaf(lines.length - 1, 'eof');
   return { root, refs };
@@ -1883,17 +1971,22 @@ function renderItem(it, refs, loose) {
   if (it.children.length === 0) return '<li>' + check + '</li>\n';
   let out = '<li>';
   let first = true;
+  let seenList = false; // a paragraph after a nested list in the same item
+  // renders with <p> even in a tight list (only the first paragraph of
+  // a tight item, and paragraphs after non-list blocks, render bare)
   for (const ch of it.children) {
     if (ch.t === 'para') {
       const inner = inlineParse(ch.lines.join('\n'), refs);
+      const wrap = loose || seenList;
       if (first && check) {
-        out += loose ? '<p>' + check + ' ' + inner + '</p>\n' : check + ' ' + inner;
-      } else if (loose) {
+        out += wrap ? '<p>' + check + ' ' + inner + '</p>\n' : check + ' ' + inner;
+      } else if (wrap) {
         out += '<p>' + inner + '</p>\n';
       } else {
         out += inner;
       }
     } else {
+      if (ch.t === 'list') seenList = true;
       if (first && check) out += check + ' ';
       out += renderBlock(ch, refs);
     }
