@@ -1568,6 +1568,32 @@ function parseBlocks(lines, endsWithNL) {
     }
     // ---- phase 2: process the remaining content ----
     while (true) {
+      // Expand leading tabs to spaces (based on the current column) when the
+      // line is inside a container: marked expands a tab in the leading
+      // whitespace of a line inside a blockquote/list item (fence content,
+      // indented code, and paragraph text alike), but preserves it at the
+      // top level. E.g. `- ```\n  \tfoo` gives code `  foo`, while a
+      // top-level ```\n\tfoo gives code `\tfoo`. This runs inside the loop
+      // (not phase 1) because the container that opens on this very line
+      // is not in the stack yet during phase 1.
+      if (stack.length > 1) {
+        const rest0 = curRest(cur);
+        let k = 0, col = cur.col, out = '';
+        let changed = false;
+        while (k < rest0.length && (rest0[k] === ' ' || rest0[k] === '\t')) {
+          if (rest0[k] === '\t') {
+            const sp = 4 - (col % 4);
+            out += ' '.repeat(sp);
+            col += sp;
+            changed = true;
+          } else {
+            out += ' ';
+            col++;
+          }
+          k++;
+        }
+        if (changed) cur.s = cur.s.slice(0, cur.p) + out + rest0.slice(k);
+      }
       const content = curRest(cur);
       // fence leaf
       if (leaf && leaf.t === 'fence') {
