@@ -227,15 +227,17 @@ function unpairedBacktickRuns(t) {
       i = j - 1;
     }
   }
+  // greedy left-to-right code-span scan: a run that finds a closer of
+  // exactly its own length forms a span, consuming every run inside it
   let unpaired = 0;
-  const used = new Array(runs.length).fill(false);
-  for (let a = 0; a < runs.length; a++) {
-    if (used[a]) continue;
-    let paired = false;
+  let a = 0;
+  while (a < runs.length) {
+    let found = -1;
     for (let b = a + 1; b < runs.length; b++) {
-      if (!used[b] && runs[b].len === runs[a].len) { used[a] = used[b] = true; paired = true; break; }
+      if (runs[b].len === runs[a].len) { found = b; break; }
     }
-    if (!paired) unpaired++;
+    if (found < 0) { unpaired++; a++; }
+    else a = found + 1;
   }
   return unpaired;
 }
@@ -322,7 +324,8 @@ function matchBareEmail(s, i, onClose) {
     let k = end;
     while (s[k] === '_') k++;
     if (!(onClose && onClose(k))) return null;
-    end = k;
+    // the _ run is a closing emphasis delimiter: the email ends
+    // before it (end is unchanged)
   }
   return { len: end - i };
 }
@@ -978,8 +981,10 @@ function resolveEmphasis(delims) {
           paired = true;
           break;
         }
-        // closer still has length: look for another opener
-        o = prev[o];
+        // closer still has length: look back again from just before the
+        // closer — the same opener may still have length left and is the
+        // nearest candidate (e.g. ***foo*** pairs strong, then em)
+        o = prev[cur];
         paired = true;
         continue;
       }
