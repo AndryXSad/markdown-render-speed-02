@@ -338,22 +338,24 @@ function matchHtmlTag(s, i) {
   let closing = false;
   if (s[j] === '/') { closing = true; j++; }
   if (j >= n || !/[A-Za-z]/.test(s[j])) return null;
+  const nameStart = j;
   while (j < n && /[A-Za-z0-9-]/.test(s[j])) j++;
   const nameEnd = j;
+  const name = s.slice(nameStart, nameEnd).toLowerCase();
   if (closing) {
     // closing tag: optional spaces then >
     let k = j;
     while (k < n && (s[k] === ' ' || s[k] === '\t' || s[k] === '\n')) k++;
-    if (s[k] === '>') return { len: k + 1 - i };
+    if (s[k] === '>') return { len: k + 1 - i, name, closing: true };
     return null;
   }
   // open tag: attributes (each preceded by whitespace), optional / , then >
   while (true) {
     if (j >= n) return null;
     const c = s[j];
-    if (c === '>') return { len: j + 1 - i };
+    if (c === '>') return { len: j + 1 - i, name, closing: false };
     if (c === '/') {
-      if (s[j + 1] === '>') return { len: j + 2 - i };
+      if (s[j + 1] === '>') return { len: j + 2 - i, name, closing: false };
       return null;
     }
     if (c !== ' ' && c !== '\t' && c !== '\n') return null;
@@ -598,6 +600,14 @@ function plainTextOf(nodes, a, b) {
 }
 
 // ============================ inline main ============================
+
+// Whether the inline parser is currently inside a raw <a>...</a> element
+// (marked quirk): an opening <a> tag seen as inline HTML sets this and a
+// closing </a> clears it, and the flag LEAKS across blocks for the rest of
+// the document. While set, bare URL/email autolinks are not recognised
+// (Q1-Q7); angle autolinks <...> still are. HTML blocks do not touch it
+// (the tag there never reaches the inline parser). Reset per parse().
+let inRawA = false;
 
 function inlineParse(text, refs) {
   const nodes = [];
@@ -935,6 +945,18 @@ function inlineParse(text, refs) {
       }
       const tag = matchHtmlTag(text, i);
       if (tag) {
+        // a raw <a> opens the "inside a link" state (bare autolinks stop
+        // being recognised); </a> closes it (see inRawA above). But a
+        // bare <a> or <a/> (name immediately followed by > or />) does NOT
+        // open it (marked: only a tag with whitespace or attributes
+        // after the name counts; S1/S2/S14/S15 vs S3-S11/S16).
+        if (tag.name === 'a') {
+          if (tag.closing) inRawA = false;
+          else {
+            const afterName = text.slice(i + 2, i + tag.len);
+            if (afterName !== '>' && afterName !== '/>') inRawA = true;
+          }
+        }
         nodes.push({ t: 6, s: text.slice(i, i + tag.len) });
         i += tag.len;
         continue;
@@ -1002,7 +1024,8 @@ function inlineParse(text, refs) {
           }
         }
       }
-      const bu = matchBareUrl(text, i, brk);
+      // a bare URL inside a raw <a> element is not an autolink (marked)
+      const bu = inRawA ? null : matchBareUrl(text, i, brk);
       if (bu) {
         const open = { t: 3, href: hrefBare(bu.href), title: null, auto: true };
         nodes.push(open, { t: 0, s: bu.text }, { t: 4 });
@@ -1010,9 +1033,10 @@ function inlineParse(text, refs) {
         continue;
       }
     }
-    // bare email (only at the start of a local-part run)
+    // bare email (only at the start of a local-part run); not an autolink
+    // inside a raw <a> element (marked)
     if (EMAIL_LOCAL.test(c) && (i === 0 || !EMAIL_LOCAL.test(text[i - 1]))) {
-      const em = matchBareEmail(text, i, underCloserAt);
+      const em = inRawA ? null : matchBareEmail(text, i, underCloserAt);
       if (em) {
         const open = { t: 3, href: 'mailto:' + em, title: null, auto: true };
         nodes.push(open, { t: 0, s: em }, { t: 4 });
@@ -2218,6 +2242,7 @@ export function parse(markdown) {
   const endsWithNL = md.endsWith('\n');
   let lines = md.split('\n');
   if (endsWithNL) lines.pop();
+  inRawA = false;
   const { root, refs } = parseBlocks(lines, endsWithNL);
   return renderBlocks(root.children, refs);
 }
