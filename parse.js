@@ -232,6 +232,17 @@ function matchBareUrl(s, i, brk = -1) {
   // as a whole first, so the entity check runs before the ';' trim
   const TRAIL = '? ! . , : * _ ~ ;';
   const ENT_RE = /&(?:#\d+|#[xX][0-9a-fA-F]+|[A-Za-z0-9]+);$/;
+  // balance parens (marked): a trailing ')' is dropped when it is
+  // unmatched, or when the group it closes contains a nested '('
+  // (a bare URL allows only one level of parens at its end); an
+  // unclosed '(' truncates the URL at that '('. An unmatched ')'
+  // EARLIER in the URL does not unbalance a later group: the depth
+  // never goes below zero (so `https://e.com/s)](https://i.io/q)`
+  // keeps its final ')' and the whole group). The nested-group trim
+  // intentionally leaves an unclosed '(' behind, so once it has run
+  // the unclosed-'(' truncation below is suppressed for the rest of
+  // this URL (noUnclosedTrunc).
+  let noUnclosedTrunc = false;
   let changed = true;
   while (changed) {
     changed = false;
@@ -240,31 +251,38 @@ function matchBareUrl(s, i, brk = -1) {
     while (url.length > 0 && TRAIL.indexOf(url[url.length - 1]) >= 0) {
       url = url.slice(0, -1); changed = true;
     }
-    // balance parens: truncate at first unclosed '('
-    let depth = 0, cut = -1;
+    let depth = 0;
     for (let k = 0; k < url.length; k++) {
       if (url[k] === '(') depth++;
-      else if (url[k] === ')') {
-        if (depth > 0) depth--;
-        else { /* unmatched ) : only trim if trailing */ }
-      }
+      else if (url[k] === ')') { if (depth > 0) depth--; }
     }
-    if (depth > 0) {
+    if (depth > 0 && !noUnclosedTrunc) {
       // find first unclosed '(' : walk with a stack
       const stack = [];
       for (let k = 0; k < url.length; k++) {
         if (url[k] === '(') stack.push(k);
         else if (url[k] === ')') { if (stack.length) stack.pop(); }
       }
-      if (stack.length) { cut = stack[0]; url = url.slice(0, cut); changed = true; }
-    } else {
-      // trim trailing unmatched ')'
-      let d2 = 0, t = url.length;
+      if (stack.length) { url = url.slice(0, stack[0]); changed = true; }
+    } else if (depth === 0) {
+      // trim trailing ')' that are unmatched or close a nested group
+      let t = url.length;
       while (t > 0 && url[t - 1] === ')') {
-        // count parens in url[0..t)
-        let bal = 0;
-        for (let k = 0; k < t; k++) { if (url[k] === '(') bal++; else if (url[k] === ')') bal--; }
-        if (bal < 0) { t--; changed = true; } else break;
+        // find the '(' matching this ')' (scan back from t-1)
+        let d = 0, open = -1;
+        for (let k = t - 1; k >= 0; k--) {
+          if (url[k] === ')') d++;
+          else if (url[k] === '(') {
+            d--;
+            if (d === 0) { open = k; break; }
+          }
+        }
+        if (open < 0) { t--; changed = true; continue; } // unmatched
+        // does the group (open, t-1) contain another '(' ?
+        let nested = false;
+        for (let k = open + 1; k < t - 1; k++) if (url[k] === '(') { nested = true; break; }
+        if (nested) { t--; changed = true; noUnclosedTrunc = true; continue; }
+        break;
       }
       if (t < url.length) url = url.slice(0, t);
     }
