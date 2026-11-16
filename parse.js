@@ -143,7 +143,7 @@ const EMAIL_DOMAIN_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?/;
 
 // Try to match a bare email starting at position i (start of a local-part run).
 // Returns the matched email string or null.
-function matchBareEmail(s, i) {
+function matchBareEmail(s, i, underCloser) {
   const n = s.length;
   let j = i;
   while (j < n && EMAIL_LOCAL.test(s[j])) j++;
@@ -158,8 +158,8 @@ function matchBareEmail(s, i) {
     if (k >= n || !isAlphaNum(s[k])) return null;
     let m = k + 1;
     while (m < n && ((s[m] >= 'a' && s[m] <= 'z') || (s[m] >= 'A' && s[m] <= 'Z') || (s[m] >= '0' && s[m] <= '9') || s[m] === '-' || s[m] === '_')) m++;
-    // label must end with alphanum
-    if (!isAlphaNum(s[m - 1])) m--;
+    // label must end with alphanum (back up over any trailing - / _)
+    while (m > k && !isAlphaNum(s[m - 1])) m--;
     if (m === k) return null;
     labels++;
     lastEnd = m;
@@ -170,8 +170,14 @@ function matchBareEmail(s, i) {
     break;
   }
   if (labels < 2) return null;
-  // char after domain must not be - or _
-  if (s[lastEnd] === '-' || s[lastEnd] === '_') return null;
+  // char after domain must not be - or _ (a trailing '_' would make the
+  // address part of a longer token) — unless the '_' is a closing
+  // emphasis delimiter: an earlier '_' opener pairs with it, so the
+  // email ends before it (marked: `_foo bar@example.com_` links)
+  if (s[lastEnd] === '-' || s[lastEnd] === '_') {
+    if (s[lastEnd] === '_' && underCloser && underCloser(lastEnd)) return s.slice(i, lastEnd);
+    return null;
+  }
   return s.slice(i, lastEnd);
 }
 
@@ -594,6 +600,25 @@ function inlineParse(text, refs) {
     nodes.push(d);
     delims.push(d);
   }
+  // Is the '_' run at pos a plausible closing emphasis delimiter? (It can
+  // close, and an earlier '_' opener exists.) Used to rescue a bare email
+  // that ends right before such a run (e.g. `_foo bar@example.com_`).
+  function underCloserAt(pos) {
+    let m = pos;
+    while (m < n && text[m] === '_') m++;
+    if (m === pos) return false;
+    const prev = pos > 0 ? text[pos - 1] : '';
+    const next = m < n ? text[m] : '';
+    const prevWs = prev === '' || isSpaceCh(prev);
+    const nextWs = next === '' || isSpaceCh(next);
+    const prevPunct = prev !== '' && isPunct(prev);
+    const nextPunct = next !== '' && isPunct(next);
+    const leftFlank = !nextWs && (!nextPunct || prevWs || prevPunct);
+    const rightFlank = !prevWs && (!prevPunct || nextWs || nextPunct);
+    if (!(rightFlank && (!leftFlank || nextPunct))) return false;
+    for (const d of delims) if (d.ch === '_' && d.canOpen && d.len > 0) return true;
+    return false;
+  }
 
   while (i < n) {
     const c = text[i];
@@ -893,7 +918,7 @@ function inlineParse(text, refs) {
     }
     // bare email (only at the start of a local-part run)
     if (EMAIL_LOCAL.test(c) && (i === 0 || !EMAIL_LOCAL.test(text[i - 1]))) {
-      const em = matchBareEmail(text, i);
+      const em = matchBareEmail(text, i, underCloserAt);
       if (em) {
         const open = { t: 3, href: 'mailto:' + em, title: null, auto: true };
         nodes.push(open, { t: 0, s: em }, { t: 4 });
