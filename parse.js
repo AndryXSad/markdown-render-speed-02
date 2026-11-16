@@ -412,6 +412,8 @@ function matchHtmlTag(s, i) {
 function linkTextOk(t) {
   let p = 0;
   const n = t.length;
+  // a backtick run has been closed already (greedy pairing)
+  let seen = false;
   while (p < n) {
     const c = t[p];
     if (c === '\\' && p + 1 < n) { p += 2; continue; }
@@ -420,10 +422,18 @@ function linkTextOk(t) {
     while (p + run < n && t[p + run] === '`') run++;
     let q = p + run;
     while (q < n && t[q] !== '`') q++;
-    if (q >= n) return p + run >= n;
+    // no closing backtick inside the label: the run opens an unclosed
+    // code span. That invalidates the label unless an earlier span was
+    // already closed (greedy pairing) AND this run reaches the end of
+    // the label (a trailing literal run). A lone first run (cm-525,
+    // cm-537, G4, G9) or a run with text after it (I2, I3, I4, J4)
+    // makes the label unusable; a trailing run after a closed span
+    // (doc-10, doc-23) is harmless.
+    if (q >= n) return seen && p + run >= n;
     let run2 = 0;
     while (q + run2 < n && t[q + run2] === '`') run2++;
     p = q + run2;
+    seen = true;
   }
   return true;
 }
@@ -619,6 +629,42 @@ function inlineParse(text, refs) {
     for (const d of delims) if (d.ch === '_' && d.canOpen && d.len > 0) return true;
     return false;
   }
+  // Would the ']' at position j close the topmost open '[' opener into a
+  // link/image? A pure mirror of the ']' handler's decision (no mutation).
+  // A code span must not swallow such a bracket (marked resolves the link
+  // first: `[run ``response`][tool-91]` links, the backtick stays literal).
+  function bracketFormsLink(j) {
+    let oi = openers.length - 1;
+    while (oi >= 0 && !openers[oi].active) oi--;
+    if (oi < 0) return false;
+    const op = openers[oi];
+    let hasLink = false;
+    if (!op.img) {
+      for (let k = op.ni + 1; k < nodes.length; k++) {
+        if (nodes[k].t === 3 && !nodes[k].auto) { hasLink = true; break; }
+      }
+    }
+    if (hasLink) return false;
+    const rawLabel = text.slice(op.src + (op.img ? 2 : 1), j);
+    const after = j + 1;
+    const textOk = linkTextOk(rawLabel);
+    if (text[after] === '(' && textOk) {
+      if (tryInlineLink(text, after)) return true;
+      const norm = normalizeLabel(rawLabel);
+      return !!(norm && refs.has(norm));
+    }
+    if (text[after] === '[' && textOk) {
+      const close = text.indexOf(']', after + 1);
+      if (close >= after + 1) {
+        const label = close === after + 1 ? rawLabel : text.slice(after + 1, close);
+        const norm = normalizeLabel(label);
+        if (norm && refs.has(norm)) return true;
+      }
+      return false;
+    }
+    const norm = normalizeLabel(rawLabel);
+    return !!(norm && refs.has(norm));
+  }
 
   while (i < n) {
     const c = text[i];
@@ -660,7 +706,8 @@ function inlineParse(text, refs) {
     if (c === '`') {
       let m = 0;
       while (i + m < n && text[i + m] === '`') m++;
-      // find a run of exactly m backticks
+      // find a run of exactly m backticks; a ']' that would close an open
+      // link text stops the search (the span cannot swallow it)
       let j = i + m, found = -1;
       while (j < n) {
         if (text[j] === '`') {
@@ -668,7 +715,10 @@ function inlineParse(text, refs) {
           while (j + r < n && text[j + r] === '`') r++;
           if (r === m) { found = j; break; }
           j += r;
-        } else j++;
+        } else {
+          if (text[j] === ']' && bracketFormsLink(j)) break;
+          j++;
+        }
       }
       if (found >= 0) {
         let content = text.slice(i + m, found);
