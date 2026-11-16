@@ -177,13 +177,18 @@ function matchBareEmail(s, i) {
 
 // Match a bare URL (http/https/ftp/www/xmpp/mailto) at position i.
 // Returns {len, href, text} or null. `text` is the display text, `href` the URL.
-function matchBareUrl(s, i) {
+// `brk` is the position of a `]` that must not be swallowed (it closes a
+// link text whose destination follows); -1 / omitted = no such bracket.
+function matchBareUrl(s, i, brk = -1) {
   const n = s.length;
   let scheme = null; // 'http' | 'https' | 'ftp' | 'www' | 'xmpp' | 'mailto'
   let start = i;
-  if (s.startsWith('http://', i)) { scheme = 'http'; start = i + 7; }
-  else if (s.startsWith('https://', i)) { scheme = 'https'; start = i + 8; }
-  else if (s.startsWith('ftp://', i)) { scheme = 'ftp'; start = i + 6; }
+  // http/https/ftp schemes are case-insensitive (marked); www./xmpp:/
+  // mailto: are lowercase only (WWW./MAILTO:/XMPP: do not link)
+  const low8 = s.slice(i, i + 8).toLowerCase();
+  if (low8.startsWith('http://')) { scheme = 'http'; start = i + 7; }
+  else if (low8.startsWith('https://')) { scheme = 'https'; start = i + 8; }
+  else if (low8.startsWith('ftp://')) { scheme = 'ftp'; start = i + 6; }
   else if (s.startsWith('www.', i)) { scheme = 'www'; start = i + 4; }
   else if (s.startsWith('xmpp:', i)) { scheme = 'xmpp'; start = i + 5; }
   else if (s.startsWith('mailto:', i)) { scheme = 'mailto'; start = i + 7; }
@@ -207,8 +212,9 @@ function matchBareUrl(s, i) {
   }
 
   // http/https/ftp/www: consume [^\s<>]+ then trim trailing punct / balance parens
+  // (stops at `brk`, a `]` that closes a link text — see the caller)
   let j = start;
-  while (j < n && s[j] !== ' ' && s[j] !== '\t' && s[j] !== '\n' && s[j] !== '\r' && s[j] !== '<' && s[j].charCodeAt(0) >= 32 && s[j] !== '\u007f') j++;
+  while (j < n && j !== brk && s[j] !== ' ' && s[j] !== '\t' && s[j] !== '\n' && s[j] !== '\r' && s[j] !== '<' && s[j].charCodeAt(0) >= 32 && s[j] !== '\u007f') j++;
   if (j === start) return null;
   let url = s.slice(i, j);
   // www. needs at least one char after the prefix (already true) — but a lone
@@ -733,8 +739,19 @@ function inlineParse(text, refs) {
             nodes.splice(startNi, nodes.length - startNi, imgNode);
           } else {
             const kids = nodes.splice(startNi + 1, nodes.length - (startNi + 1));
+            // a bare URL/email autolink inside a formed link renders as
+            // plain text (marked: bare autolinks are not recognised
+            // inside links); an angle autolink stays a link. Flatten
+            // each bare autolink triple (open, text, close) to its text.
+            const flat = [];
+            for (let k = 0; k < kids.length; k++) {
+              if (kids[k].t === 3 && kids[k].auto && !kids[k].angle && kids[k + 1] && kids[k + 1].t === 0 && kids[k + 2] && kids[k + 2].t === 4) {
+                flat.push(kids[k + 1]);
+                k += 2;
+              } else flat.push(kids[k]);
+            }
             const open = { t: 3, href: hrefInline(href), title: title === null ? null : escAttr(title) };
-            nodes.splice(startNi, 1, open, ...kids, { t: 4 });
+            nodes.splice(startNi, 1, open, ...flat, { t: 4 });
           }
           // deactivate openers inside the link text
           openers.length = oi;
@@ -789,7 +806,9 @@ function inlineParse(text, refs) {
     if (c === '<') {
       const al = matchAutolink(text, i);
       if (al) {
-        const open = { t: 3, href: hrefBare(al.href), title: null, auto: true };
+        // angle autolinks stay links even inside a formed link (marked);
+        // bare URLs/emails do not (they are demoted there) — tag them
+        const open = { t: 3, href: hrefBare(al.href), title: null, auto: true, angle: true };
         nodes.push(open, { t: 0, s: al.text }, { t: 4 });
         i += al.len;
         continue;
@@ -818,8 +837,52 @@ function inlineParse(text, refs) {
       continue;
     }
     // bare URL / www / xmpp / mailto / email
-    if (c === 'h' || c === 'f' || c === 'w' || c === 'x' || c === 'm') {
-      const bu = matchBareUrl(text, i);
+    // (H/F included: http/https/ftp schemes are case-insensitive)
+    if (c === 'h' || c === 'f' || c === 'w' || c === 'x' || c === 'm' || c === 'H' || c === 'F') {
+      // a bare URL inside link text must not swallow the `]` that closes
+      // the text when a valid destination follows it (R7: the `]` then
+      // closes the text; with no destination the `]` stays in the URL,
+      // R4-R6). Mirror the `]` handler's destination checks.
+      let brk = -1;
+      if (openers.length) {
+        let oi = openers.length - 1;
+        while (oi >= 0 && !openers[oi].active) oi--;
+        if (oi >= 0 && openers[oi].src < i) {
+          let e = i;
+          while (e < n && text[e] !== ' ' && text[e] !== '\t' && text[e] !== '\n' && text[e] !== '\r' && text[e] !== '<' && text[e].charCodeAt(0) >= 32 && text[e] !== '\u007f') e++;
+          const b = text.indexOf(']', i);
+          if (b !== -1 && b < e) {
+            const op = openers[oi];
+            let hasLink = false;
+            if (!op.img) {
+              for (let k = op.ni + 1; k < nodes.length; k++) {
+                if (nodes[k].t === 3 && !nodes[k].auto) { hasLink = true; break; }
+              }
+            }
+            if (!hasLink) {
+              const after = b + 1;
+              const rawLabel = text.slice(op.src + (op.img ? 2 : 1), b);
+              let destOk = false;
+              if (text[after] === '(' && linkTextOk(rawLabel)) {
+                if (tryInlineLink(text, after)) destOk = true;
+                else { const norm = normalizeLabel(rawLabel); if (norm && refs.has(norm)) destOk = true; }
+              } else if (text[after] === '[' && linkTextOk(rawLabel)) {
+                const close = text.indexOf(']', after + 1);
+                if (close >= after + 1) {
+                  const label = close === after + 1 ? rawLabel : text.slice(after + 1, close);
+                  const norm = normalizeLabel(label);
+                  if (norm && refs.has(norm)) destOk = true;
+                }
+              } else {
+                const norm = normalizeLabel(rawLabel);
+                if (norm && refs.has(norm)) destOk = true;
+              }
+              if (destOk) brk = b;
+            }
+          }
+        }
+      }
+      const bu = matchBareUrl(text, i, brk);
       if (bu) {
         const open = { t: 3, href: hrefBare(bu.href), title: null, auto: true };
         nodes.push(open, { t: 0, s: bu.text }, { t: 4 });
@@ -842,7 +905,7 @@ function inlineParse(text, refs) {
     while (j < n) {
       const ch = text[j];
       if (ch === '\n' || ch === '\\' || ch === '`' || ch === '[' || ch === ']' || ch === '*' || ch === '_' || ch === '~' || ch === '<' || ch === '&' || ch === '!') break;
-      if ((ch === 'h' || ch === 'f' || ch === 'w' || ch === 'x' || ch === 'm')) break;
+      if ((ch === 'h' || ch === 'f' || ch === 'w' || ch === 'x' || ch === 'm' || ch === 'H' || ch === 'F')) break;
       if (EMAIL_LOCAL.test(ch) && !EMAIL_LOCAL.test(text[j - 1])) break;
       j++;
     }
