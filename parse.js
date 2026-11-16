@@ -221,11 +221,16 @@ function matchBareUrl(s, i, brk = -1) {
   // "www." with nothing after is not a link; also require the domain-ish part
   // to contain at least one non-punct char? www.a links, so any char counts.
   if (scheme === 'www' && url.length <= 4) return null;
-  // trim trailing punctuation ? ! . , : * _ ~
-  const TRAIL = '? ! . , : * _ ~';
+  // trim trailing punctuation ? ! . , : * _ ~ ; — a trailing ';' is also
+  // excluded (marked), but a trailing entity '&word;' must be stripped
+  // as a whole first, so the entity check runs before the ';' trim
+  const TRAIL = '? ! . , : * _ ~ ;';
+  const ENT_RE = /&(?:#\d+|#[xX][0-9a-fA-F]+|[A-Za-z0-9]+);$/;
   let changed = true;
   while (changed) {
     changed = false;
+    const em0 = ENT_RE.exec(url);
+    if (em0) { url = url.slice(0, url.length - em0[0].length); changed = true; }
     while (url.length > 0 && TRAIL.indexOf(url[url.length - 1]) >= 0) {
       url = url.slice(0, -1); changed = true;
     }
@@ -258,10 +263,6 @@ function matchBareUrl(s, i, brk = -1) {
       if (t < url.length) url = url.slice(0, t);
     }
   }
-  if (url.length === 0) return null;
-  // a trailing entity-like '&word;' (or '&#...;') is not part of the URL
-  const em = /&(?:#\d+|#[xX][0-9a-fA-F]+|[A-Za-z0-9]+);$/.exec(url);
-  if (em) url = url.slice(0, url.length - em[0].length);
   if (url.length === 0) return null;
   const href = scheme === 'www' ? 'http://' + url : url;
   return { len: url.length, href, text: url };
@@ -1124,6 +1125,19 @@ function curSkipWsUpTo(cur, n) {
   }
 }
 function saveCur(cur) { return { s: cur.s, p: cur.p, col: cur.col }; }
+// Strip up to n columns of indent from a FENCED-code content line
+// (marked: a tab consumed here counts as exactly 1 column and is
+// removed whole — unlike the spec's expansion to the next tab stop,
+// which would leave (width - n) spaces behind).
+function fenceStripIndent(cur, n) {
+  const s = cur.s;
+  while (n > 0 && cur.p < s.length) {
+    const ch = s[cur.p];
+    if (ch === ' ') { cur.p++; cur.col++; n--; }
+    else if (ch === '\t') { cur.p++; cur.col += 4 - (cur.col % 4); n--; }
+    else break;
+  }
+}
 function restoreCur(cur, sv) { cur.s = sv.s; cur.p = sv.p; cur.col = sv.col; }
 
 // ---- block-start matchers (operate on the content string after container
@@ -1740,7 +1754,7 @@ function parseBlocks(lines, endsWithNL) {
           leaf = null; // closing fence: not part of the content
         } else {
           const sv = saveCur(cur);
-          curSkipWsUpTo(cur, leaf.indent);
+          fenceStripIndent(cur, leaf.indent);
           const pushed = curRest(cur);
           leaf.node.lines.push(pushed);
           // the fence is anchored once a non-blank content line arrived
@@ -1792,7 +1806,17 @@ function parseBlocks(lines, endsWithNL) {
       }
       // paragraph leaf
       if (leaf && leaf.t === 'para') {
-        if (curBlank(cur)) { closeLeaf(li - 1); setBlankFlag(); break; }
+        if (curBlank(cur)) {
+          // a line of only spaces + a single trailing tab inside a table
+          // is an empty table row (marked); any other blank line ends
+          // the table (and the paragraph)
+          if (/^ *\t$/.test(content) && isTableLines(leaf.lines)) {
+            leaf.lines.push(content);
+            leaf.lastLazy = false;
+            break;
+          }
+          closeLeaf(li - 1); setBlankFlag(); break;
+        }
         const se = matchSetext(content);
         if (se) {
           // definitions come first: they are stripped before the setext
