@@ -467,6 +467,36 @@ function linkTextOk(t) {
   return unpaired !== 1;
 }
 
+// Count backtick runs in `t` that find no closer of exactly their own
+// length (same exact-length pairing as linkTextOk, but returns the
+// count). A formed link can only have 0 or >= 2 unpaired runs (exactly
+// one invalidates the label, so the link never forms); >= 2 means the
+// link text holds literal backticks ("poisoned", e.g. `issue ``small``).
+function unpairedBacktickRuns(t) {
+  let p = 0;
+  const n = t.length;
+  let unpaired = 0;
+  while (p < n) {
+    const c = t[p];
+    if (c === '\\' && p + 1 < n) { p += 2; continue; }
+    if (c !== '`') { p++; continue; }
+    let run = 0;
+    while (p + run < n && t[p + run] === '`') run++;
+    let q = p + run, found = -1;
+    while (q < n) {
+      if (t[q] === '`') {
+        let r2 = 0;
+        while (q + r2 < n && t[q + r2] === '`') r2++;
+        if (r2 === run) { found = q; break; }
+        q += r2;
+      } else q++;
+    }
+    if (found < 0) { unpaired++; p += run; continue; }
+    p = found + run;
+  }
+  return unpaired;
+}
+
 // Does the '(' at s[i] have a matching closing ')' later (paren-depth scan,
 // skipping <...> destinations and quoted titles)? Used to decide whether a
 // failed inline link suppresses emphasis inside its text: marked leaves the
@@ -1084,6 +1114,47 @@ function inlineParse(text, refs) {
     else if (nd.t === 2) { nd.linkId = linkStack.length ? linkStack[linkStack.length - 1] : 0; }
   }
   linkDepth = linkId;
+
+  // marked quirk: a link whose text holds >= 2 unpaired backtick runs
+  // ("poisoned", e.g. `issue ``small``) suppresses ALL emphasis pairs
+  // (*, _, **, __) after the link up to the next code span in the same
+  // block; emphasis after that code span resolves normally (I1-I8).
+  // With no code span after the link there is no suppression (I5), and
+  // a code span BEFORE the emphasis does not suppress it (I6). A proper
+  // code span in the link text is not poisoned (its backticks are not
+  // literal text, H7). Suppressed delimiters are dropped from the
+  // resolution list only; they stay in `nodes` and render literally.
+  {
+    const suppressed = new Set();
+    for (let k = 0; k < nodes.length; k++) {
+      if (nodes[k].t !== 3) continue;
+      let depth = 1, closeIdx = -1;
+      for (let m = k + 1; m < nodes.length; m++) {
+        if (nodes[m].t === 3) depth++;
+        else if (nodes[m].t === 4) { depth--; if (depth === 0) { closeIdx = m; break; } }
+      }
+      if (closeIdx < 0) continue;
+      let label = '';
+      for (let m = k + 1; m < closeIdx; m++) if (nodes[m].t === 0) label += nodes[m].s;
+      if (unpairedBacktickRuns(label) < 2) continue;
+      let codeIdx = -1;
+      for (let m = closeIdx + 1; m < nodes.length; m++) {
+        if (nodes[m].t === 1) { codeIdx = m; break; }
+      }
+      if (codeIdx < 0) continue;
+      // only top-level delimiters are suppressed: emphasis inside
+      // another link's text still resolves normally (doc-35
+      // [default run*fast*] keeps its <em> even inside the window)
+      for (let m = closeIdx + 1; m < codeIdx; m++) {
+        if (nodes[m].t === 2 && nodes[m].linkId === 0) suppressed.add(nodes[m]);
+      }
+    }
+    if (suppressed.size) {
+      for (let k = delims.length - 1; k >= 0; k--) {
+        if (suppressed.has(delims[k])) delims.splice(k, 1);
+      }
+    }
+  }
 
   // ---- emphasis / strikethrough resolution (spec appendix algorithm) ----
   resolveEmphasis(nodes, delims);
