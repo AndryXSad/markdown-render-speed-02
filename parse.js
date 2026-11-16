@@ -355,6 +355,9 @@ function matchEmail(src, at, txt) {
 function matchHtmlTag(src, i) {
   const n = src.length;
   if (src.startsWith('<!--', i)) {
+    // '<!-->' and '<!--->' are complete (empty) comments by themselves.
+    if (src.startsWith('<!-->', i)) return { end: i + 5 };
+    if (src.startsWith('<!--->', i)) return { end: i + 6 };
     const e = src.indexOf('-->', i + 4);
     if (e === -1) return null;
     return { end: e + 3 };
@@ -377,7 +380,8 @@ function matchHtmlTag(src, i) {
     return { end: j + 1 };
   }
   let j = i + 1;
-  if (src[j] === '/') j++;
+  const isClose = src[j] === '/';
+  if (isClose) j++;
   if (j >= n || !isAlpha(src.charCodeAt(j))) return null;
   while (j < n) {
     const c = src.charCodeAt(j);
@@ -386,14 +390,19 @@ function matchHtmlTag(src, i) {
   }
   for (;;) {
     let k = j;
-    while (k < n && isSpace(src.charCodeAt(k))) k++;
+    let sawSpace = false;
+    while (k < n && isSpace(src.charCodeAt(k))) { k++; sawSpace = true; }
     if (k >= n) return null;
     const c = src.charCodeAt(k);
     if (c === 62) return { end: k + 1 }; // '>'
+    // A closing tag takes no attributes and no '/>'.
+    if (isClose) return null;
     if (c === 47) { // '/'
       if (k + 1 < n && src.charCodeAt(k + 1) === 62) return { end: k + 2 };
       return null;
     }
+    // An attribute must be preceded by whitespace.
+    if (!sawSpace) return null;
     if (!isAlpha(c) && c !== 95 && c !== 58) return null; // attr name start
     j = k;
     while (j < n) {
@@ -401,6 +410,7 @@ function matchHtmlTag(src, i) {
       if (isAlnum(cc) || cc === 95 || cc === 58 || cc === 46 || cc === 45) j++;
       else break;
     }
+    const nameEnd = j;
     k = j;
     while (k < n && isSpace(src.charCodeAt(k))) k++;
     if (k < n && src.charCodeAt(k) === 61) { // '='
@@ -411,7 +421,8 @@ function matchHtmlTag(src, i) {
       if (q === 34 || q === 39) {
         const quote = src[k];
         k++;
-        while (k < n && src[k] !== quote && src[k] !== '\n') k++;
+        // A quoted attribute value may span lines.
+        while (k < n && src[k] !== quote) k++;
         if (k >= n || src[k] !== quote) return null;
         j = k + 1;
       } else {
@@ -425,7 +436,9 @@ function matchHtmlTag(src, i) {
         j = k;
       }
     } else {
-      j = k;
+      // A valueless attribute: rewind to just after its name so the next
+      // loop iteration sees the whitespace before the next attribute.
+      j = nameEnd;
     }
   }
 }
@@ -611,7 +624,8 @@ function tryLinkTarget(src, closerPos, op, refs) {
   if (j < n && src[j] === '(') {
     const t = parseInlineLink(src, j);
     if (t) return { href: escNoEncode(safeEncodeURI(t.href)), title: t.title === null ? null : escNoEncode(t.title), next: t.next };
-    return null;
+    // A failed inline link falls back to a shortcut reference: '[foo]'
+    // may still link if a def exists, leaving '(...)' as plain text.
   }
   if (j < n && src[j] === '[') {
     const lab = parseRefLabel(src, j);
@@ -661,7 +675,13 @@ function parseInline(src, refs) {
   while (i < n) {
     const c = src.charCodeAt(i);
     if (c === 92) { // backslash
-      if (i + 1 < n && src.charCodeAt(i + 1) === 10) { flush(); nodes.push({ k: 3, backslash: true }); i += 2; continue; }
+      // Backslash + newline is a hard break; leading spaces/tabs of the
+      // next line are stripped.
+      if (i + 1 < n && src.charCodeAt(i + 1) === 10) {
+        flush(); nodes.push({ k: 3, backslash: true }); i += 2;
+        while (i < n && (src.charCodeAt(i) === 32 || src.charCodeAt(i) === 9)) i++;
+        continue;
+      }
       if (i + 1 < n && isPunctCode(src.charCodeAt(i + 1))) {
         const ch = src[i + 1];
         if (ch === '&' || ch === '<' || ch === '>' || ch === '"' || ch === "'") {
@@ -769,7 +789,12 @@ function parseInline(src, refs) {
     if (c === 10) { // newline: soft or hard break
       let sp = 0;
       while (sp < txt.length && txt.charCodeAt(txt.length - 1 - sp) === 32) sp++;
-      if (sp >= 2) { txt = txt.slice(0, txt.length - sp); flush(); nodes.push({ k: 3 }); i++; continue; }
+      if (sp >= 2) {
+        txt = txt.slice(0, txt.length - sp); flush(); nodes.push({ k: 3 }); i++;
+        // A hard break strips the next line's leading spaces/tabs.
+        while (i < n && (src.charCodeAt(i) === 32 || src.charCodeAt(i) === 9)) i++;
+        continue;
+      }
       txt += '\n'; i++; continue;
     }
     if (c === 119) { // 'w': www. autolink (lowercase only)
@@ -1055,6 +1080,8 @@ function parseRefDefs(text, refs) {
     if (i >= n || text[i] !== '[') break;
     const lab = parseRefLabel(text, i);
     if (!lab || lab.label.length === 0) break;
+    // A label that normalizes to empty (e.g. only whitespace) is not a def.
+    if (normalizeLabel(lab.label).length === 0) break;
     i = lab.next;
     if (i >= n || text[i] !== ':') break;
     i++;
