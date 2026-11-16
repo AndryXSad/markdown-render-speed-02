@@ -1156,7 +1156,10 @@ function parseRefDefs(text, refs) {
 function splitTableRow(line) {
   const cells = [];
   let cur = '';
-  let startsWithPipe = false, endsWithPipe = false;
+  // Leading/trailing pipes are determined after trimming whitespace.
+  const trimmedLine = line.trim();
+  const startsWithPipe = trimmedLine.startsWith('|');
+  const endsWithPipe = trimmedLine.endsWith('|');
   for (let k = 0; k < line.length; k++) {
     const ch = line[k];
     // An escaped pipe '\|' is a literal '|' in the cell (the backslash is
@@ -1167,8 +1170,6 @@ function splitTableRow(line) {
       cur += ch + line[k + 1]; k++; continue;
     }
     if (ch === '|') {
-      if (k === 0) startsWithPipe = true;
-      if (k === line.length - 1) endsWithPipe = true;
       cells.push(cur); cur = ''; continue;
     }
     cur += ch;
