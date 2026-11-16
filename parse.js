@@ -1612,7 +1612,9 @@ function parseBlocks(lines, endsWithNL) {
       } else if (fr.t === 'item') {
         if (c2.p >= c2.s.length) return c2.s.slice(c2.p);
         const sv = saveCur(c2);
-        const need = fr.contentCol - c2.col;
+        // the item's content indent is relative to its base column
+        // (already consumed by the outer frames), as in matchItem
+        const need = fr.contentIndent;
         if (!(need <= 0 || curSkipWs(c2, need))) { restoreCur(c2, sv); return null; }
       }
       if (c2.p >= c2.s.length) return c2.s.slice(c2.p);
@@ -1975,7 +1977,16 @@ function parseBlocks(lines, endsWithNL) {
         if (content[skip3(content)] === '>') { closeLeaf(li - 1); continue; }
         const lm = matchListMarker(content);
         if (lm && listCanInterrupt(lm, content)) { closeLeaf(li - 1); continue; }
-        leaf.lines.push(content);
+        if (leaf.parent && leaf.parent.t === 'item' && leadingWsCols(content, cur.col) >= 4) {
+          // a paragraph continuation inside a list item with >= 4 columns
+          // of indent past the item indent loses 4 columns (marked; the
+          // lazy branch already does this for lines that fail container
+          // matching). At the top level or in a quote the indent is kept.
+          curSkipWs(cur, 4);
+          leaf.lines.push(curRest(cur));
+        } else {
+          leaf.lines.push(content);
+        }
         leaf.lastLazy = false;
         break;
       }
