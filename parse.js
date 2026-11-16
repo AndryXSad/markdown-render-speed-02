@@ -1933,7 +1933,10 @@ function parseBlocks(lines, endsWithNL) {
           leaf = null; // closing fence: not part of the content
         } else {
           const sv = saveCur(cur);
-          fenceStripIndent(cur, leaf.indent);
+          // marked strips the opening fence's indent from content lines
+          // only for backtick fences; a tilde fence keeps the content
+          // indentation verbatim (F2/F3/F7/T6/T10/T12/U1/U3)
+          if (leaf.ch === '`') fenceStripIndent(cur, leaf.indent);
           const pushed = curRest(cur);
           leaf.node.lines.push(pushed);
           // the fence is anchored once a non-blank content line arrived
