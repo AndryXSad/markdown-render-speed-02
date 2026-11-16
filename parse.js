@@ -1216,6 +1216,14 @@ function resolveEmphasis(nodes, delims) {
           // outer pair (e.g. `*a **b**c*` stays literal, while
           // `*a **b** c*`, `*a *b*c*` and `*x**b**c*` all form).
           // Same-length inner pairs and cross-char pairs do not block.
+          // "Different length" is the pair type (use) OR the opener
+          // run length (orig): `**a *b*c* d` blocks because the outer
+          // opener `**` (orig 2) differs from the inner opener `*`
+          // (orig 1) even though both pairs would be em (use 1),
+          // while `**removes *input **parse**parse* release**` blocks
+          // the `*` closer from pairing with the `**` opener because
+          // the inner pair is strong (use 2) and the outer would be
+          // em (use 1), even though both openers are `**` (orig 2).
           // The block only applies when the closer run is short
           // (cur.len <= 2): a run of 3+ leaves the outer pair forming
           // (`**a *b*c***` -> <strong>a <em>b</em>c*</strong>,
@@ -1228,9 +1236,27 @@ function resolveEmphasis(nodes, delims) {
           let blocked = false;
           for (let k = 0; k < formed.length; k++) {
             const fp = formed[k];
-            if (fp[0] > opener.id && fp[1] < cur.id && fp[2] !== use0) {
+            if (fp[0] > opener.id && fp[1] < cur.id && (fp[2] !== use0 || delims[fp[0]].orig !== opener.orig)) {
               const iOp = delims[fp[0]], iCl = delims[fp[1]];
               if (iOp.ch === cur.ch && !iOp.canClose && wordCh.test(iCl.nextCh)) {
+                // a pure-closer delimiter of the same char between the
+                // inner closer and the outer closer cancels the block,
+                // but only when the outer pair would be STRONGER than
+                // the inner one (use0 > fp[2]): `**a *b*cd* e**` forms
+                // the strong (outer use 2 > inner use 1, the `*` after
+                // `cd` cancels it), while `**removes *input
+                // **parse**parse* release**` still blocks the em
+                // (outer use 1 < inner use 2) so the outer strong
+                // forms. `**a *b*c*d e**` still blocks because its
+                // extra `*` can both open and close.
+                let cancelled = false;
+                if (use0 > fp[2]) {
+                  for (let m = fp[1] + 1; m < cur.id; m++) {
+                    const dm = delims[m];
+                    if (dm && dm.t === 2 && dm.ch === cur.ch && dm.canClose && !dm.canOpen) { cancelled = true; break; }
+                  }
+                }
+                if (cancelled) continue;
                 if (cur.len <= 2) { blocked = true; }
                 else { kInside = true; }
                 break;
