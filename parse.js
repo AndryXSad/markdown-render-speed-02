@@ -1187,6 +1187,10 @@ function resolveEmphasis(nodes, delims) {
     // look back for an opener
     let opener = prevOf.get(cur);
     let found = null;
+    // set when the K-rule is relevant for this closer but does not
+    // block (cur.len > 2): the pair forms and the closer's leftover
+    // delimiters render INSIDE the emphasis (see renderer)
+    let kInside = false;
     while (opener) {
       if (opener.ch === cur.ch && opener.canOpen && opener.len > 0 && opener.linkId === cur.linkId && !insideFormed(opener.id)) {
         if (cur.ch === '~') {
@@ -1212,13 +1216,25 @@ function resolveEmphasis(nodes, delims) {
           // outer pair (e.g. `*a **b**c*` stays literal, while
           // `*a **b** c*`, `*a *b*c*` and `*x**b**c*` all form).
           // Same-length inner pairs and cross-char pairs do not block.
+          // The block only applies when the closer run is short
+          // (cur.len <= 2): a run of 3+ leaves the outer pair forming
+          // (`**a *b*c***` -> <strong>a <em>b</em>c*</strong>,
+          // `*a **b**c***` -> <em>a <strong>b</strong>c**</em>),
+          // while a run of 1-2 blocks (`**a *b*c**` and
+          // `*a **b**c**` both stay literal for the outer pair).
+          // When the rule is relevant but the run is long, the pair
+          // forms and the closer's leftover renders INSIDE (kInside).
           const use0 = (opener.len >= 2 && cur.len >= 2) ? 2 : 1;
           let blocked = false;
           for (let k = 0; k < formed.length; k++) {
             const fp = formed[k];
             if (fp[0] > opener.id && fp[1] < cur.id && fp[2] !== use0) {
               const iOp = delims[fp[0]], iCl = delims[fp[1]];
-              if (iOp.ch === cur.ch && !iOp.canClose && wordCh.test(iCl.nextCh)) { blocked = true; break; }
+              if (iOp.ch === cur.ch && !iOp.canClose && wordCh.test(iCl.nextCh)) {
+                if (cur.len <= 2) { blocked = true; }
+                else { kInside = true; }
+                break;
+              }
             }
           }
           if (blocked) { opener = prevOf.get(opener); continue; }
@@ -1237,6 +1253,7 @@ function resolveEmphasis(nodes, delims) {
       }
       found.opens.push({ n: use, ch: found.ch });
       cur.closes.push({ n: use, ch: cur.ch });
+      if (kInside) cur.leftoverInside = true;
       formed.push([found.id, cur.id, use]);
       found.len -= use;
       cur.len -= use;
@@ -1273,8 +1290,17 @@ function renderInline(nodes) {
         const usedClose = nd.closes.reduce((a, s) => a + s.n, 0);
         const usedOpen = nd.opens.reduce((a, s) => a + s.n, 0);
         const leftover = nd.orig - usedClose - usedOpen;
+        // a pure closer whose pair formed under the K-rule (relevant
+        // but non-blocking, see resolveEmphasis) renders its leftover
+        // delimiters INSIDE the emphasis, before the closing tag
+        // (`**a *b*c***` -> <strong>a <em>b</em>c*</strong>); any other
+        // closer renders them outside, after the tag (`*foo**` ->
+        // <em>foo</em>*)
+        if (leftover > 0 && nd.leftoverInside && nd.closes.length > 0 && nd.opens.length === 0) {
+          out += escText(nd.ch.repeat(leftover));
+        }
         for (const s of nd.closes) out += s.ch === '~' ? '</del>' : s.n === 2 ? '</strong>' : '</em>';
-        if (leftover > 0) out += escText(nd.ch.repeat(leftover));
+        if (leftover > 0 && !(nd.leftoverInside && nd.closes.length > 0 && nd.opens.length === 0)) out += escText(nd.ch.repeat(leftover));
         for (let k = nd.opens.length - 1; k >= 0; k--) {
           const s = nd.opens[k];
           out += s.ch === '~' ? '<del>' : s.n === 2 ? '<strong>' : '<em>';
