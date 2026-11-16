@@ -412,30 +412,39 @@ function matchHtmlTag(s, i) {
 function linkTextOk(t) {
   let p = 0;
   const n = t.length;
-  // a backtick run has been closed already (greedy pairing)
-  let seen = false;
+  // backtick runs that find no closer of exactly their own length
+  let unpaired = 0;
   while (p < n) {
     const c = t[p];
     if (c === '\\' && p + 1 < n) { p += 2; continue; }
     if (c !== '`') { p++; continue; }
     let run = 0;
     while (p + run < n && t[p + run] === '`') run++;
-    let q = p + run;
-    while (q < n && t[q] !== '`') q++;
-    // no closing backtick inside the label: the run opens an unclosed
-    // code span. That invalidates the label unless an earlier span was
-    // already closed (greedy pairing) AND this run reaches the end of
-    // the label (a trailing literal run). A lone first run (cm-525,
-    // cm-537, G4, G9) or a run with text after it (I2, I3, I4, J4)
-    // makes the label unusable; a trailing run after a closed span
-    // (doc-10, doc-23) is harmless.
-    if (q >= n) return seen && p + run >= n;
-    let run2 = 0;
-    while (q + run2 < n && t[q + run2] === '`') run2++;
-    p = q + run2;
-    seen = true;
+    // the code-span closer is the next run of exactly `run` backticks
+    let q = p + run, found = -1;
+    while (q < n) {
+      if (t[q] === '`') {
+        let r2 = 0;
+        while (q + r2 < n && t[q + r2] === '`') r2++;
+        if (r2 === run) { found = q; break; }
+        q += r2;
+      } else q++;
+    }
+    if (found < 0) { unpaired++; p += run; continue; }
+    // a code span whose content holds a backtick ("poisoned") invalidates
+    // the label when anything follows the span (J-rule: J1/J6 pass, J2/J3/
+    // J4/I2/I4/H1 fail); as the last thing in the label it is harmless
+    let poisoned = false;
+    for (let k = p + run; k < found; k++) {
+      if (t[k] === '`') { poisoned = true; break; }
+    }
+    if (poisoned && found + run < n) return false;
+    p = found + run;
   }
-  return true;
+  // exactly one unpaired run invalidates the label (cm-525, cm-537, G4,
+  // G9, F6, I3); zero, or two+ runs of different lengths (doc-35, G5, G6),
+  // are literal backticks and the label is fine
+  return unpaired !== 1;
 }
 
 // Does the '(' at s[i] have a matching closing ')' later (paren-depth scan,
@@ -666,6 +675,37 @@ function inlineParse(text, refs) {
     return !!(norm && refs.has(norm));
   }
 
+  // Does the label contain a code span (exact-length backtick runs)
+  // whose content itself contains a backtick? Such a "poisoned" span
+  // (`` `` a ` b `` ``) makes a failed link leave its emphasis literal
+  // (H1, I2, I6, I7); a clean span or a merely unclosed run (I3) does not.
+  function hasPoisonedCodeSpan(t) {
+    let p = 0;
+    const n = t.length;
+    while (p < n) {
+      const c = t[p];
+      if (c === '\\' && p + 1 < n) { p += 2; continue; }
+      if (c !== '`') { p++; continue; }
+      let run = 0;
+      while (p + run < n && t[p + run] === '`') run++;
+      let q = p + run, found = -1;
+      while (q < n) {
+        if (t[q] === '`') {
+          let r2 = 0;
+          while (q + r2 < n && t[q + r2] === '`') r2++;
+          if (r2 === run) { found = q; break; }
+          q += r2;
+        } else q++;
+      }
+      if (found < 0) { p += run; continue; }
+      for (let k = p + run; k < found; k++) {
+        if (t[k] === '`') return true;
+      }
+      p = found + run;
+    }
+    return false;
+  }
+
   while (i < n) {
     const c = text[i];
     // newline: hard break if 2+ trailing spaces, else soft break
@@ -839,8 +879,12 @@ function inlineParse(text, refs) {
           // the emphasis inside the text literal (marked); without a
           // closing paren, or for a ref/shortcut, emphasis resolves normally.
           // But NOT when the link failed only because its text contains a
-          // nested link (cm-519: the emphasis still forms there).
-          if (!op.img && !hasLink && text[after] === '(' && hasClosingParen(text, after)) {
+          // nested link (cm-519: the emphasis still forms there). The
+          // suppression applies when the label is valid (the failure is
+          // the destination's fault) or when the label holds a poisoned
+          // code span (H1, I2, I6, I7); a merely unclosed backtick run
+          // (I3) leaves the emphasis alone.
+          if (!op.img && !hasLink && (textOk || hasPoisonedCodeSpan(rawLabel)) && text[after] === '(' && hasClosingParen(text, after)) {
             for (let k = startNi + 1; k < nodes.length; k++) {
               if (nodes[k].t === 2) { nodes[k].canOpen = false; nodes[k].canClose = false; }
             }
