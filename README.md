@@ -1,29 +1,31 @@
 # markdown-render-speed-02
 
-[![make.fun](https://make.fun/badge/markdown-render-speed-02.svg)](https://make.fun/bounty/markdown-render-speed-02)
-[![make.fun](https://make.fun/badge/markdown-render-speed-02/AndryXSad/markdown-render-speed-02/rank.svg)](https://make.fun/bounty/markdown-render-speed-02)
-[![make.fun](https://make.fun/badge/markdown-render-speed-02/AndryXSad/markdown-render-speed-02/reward.svg)](https://make.fun/bounty/markdown-render-speed-02)
+[![make.fun](https://img.shields.io/badge/make.fun-bounty-7c3aed)](https://make.fun/bounty/markdown-render-speed-02)
+[![markdown-render-speed-02](https://img.shields.io/badge/markdown--render--speed--02-%24250-22c55e)](https://make.fun/bounty/markdown-render-speed-02)
+[![referral](https://img.shields.io/badge/referral-926c6vcc-f59e0b)](https://make.fun/r/926c6vcc)
 
-A fast, dependency-free Markdown renderer written from scratch in JavaScript,
-byte-identical to [marked](https://github.com/markedjs/marked) 18.1.3 defaults
-for the full CommonMark + GitHub Flavored Markdown feature set: ATX/setext
-headings, fenced and indented code blocks, block quotes, lists (tight/loose,
-task checkboxes, ordered start numbers), tables, HTML blocks, autolinks,
-bare URLs, reference/inline/collapsed/shortcut links, images, emphasis and
-strikethrough (with the full CommonMark delimiter-run rules), code spans,
-hard/soft breaks, and entities.
+A dependency-free CommonMark renderer in a single ES module (`parse.js`,
+zero imports), built for the
+[make.fun markdown-render-speed-02 bounty](https://make.fun/bounty/markdown-render-speed-02).
+It renders Markdown to HTML byte-for-byte identical to the reference on the
+practice set, covering ATX and setext headings, emphasis, links, autolinks,
+tables, fenced and indented code, block quotes, nested bullet/ordered/task
+lists, raw HTML blocks, entities and hard line breaks.
 
 ## Usage
 
-```js
-import { parse } from './parse.js';
-parse('# hello\n\nworld'); // => '<h1>hello</h1>\n<p>world</p>\n'
+`main.ts` is the entrypoint. It reads `$MAKEFUN_INPUT_DIR/cases.json`
+(default `/input`) and writes `$MAKEFUN_OUTPUT_DIR/html.json` (default
+`/output`) as a JSON array of HTML strings, one per case, in input order.
+
+```sh
+node main.ts
 ```
 
-`main.ts` is the make.fun driver: it reads `cases.json` from
-`$MAKEFUN_INPUT_DIR` (default `/input`), renders every case with `parse`,
-and writes `html.json` to `$MAKEFUN_OUTPUT_DIR` (default `/output`).
+## Files
 
-## Owner
+- `parse.js` — the renderer: `export parse(markdown)`.
+- `main.ts` — driver (Node built-ins + `./parse.js` only).
+- `LICENSE` — MIT.
 
-AndryXSad — referral: https://make.fun/r/926c6vcc
+Owner: AndryXSad. Referral: `926c6vcc` — https://make.fun/r/926c6vcc
