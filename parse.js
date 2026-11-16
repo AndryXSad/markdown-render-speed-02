@@ -1560,9 +1560,19 @@ function buildTable(lines) {
 }
 function finalizePara(leaf, refs) {
   const rest = extractDefs(leaf.lines, refs);
-  if (rest.length === 0) return null;
-  if (isTableLines(rest)) return buildTable(rest);
-  return { t: 'para', lines: rest };
+  if (rest.length === 0) return [];
+  // a table may start partway through the paragraph (GFM: a table
+  // interrupts a paragraph); find the first line that, with the next,
+  // forms a table header + delimiter, and split there (M4)
+  let tstart = -1;
+  for (let k = 0; k + 1 < rest.length; k++) {
+    if (isTableLines(rest.slice(k, k + 2))) { tstart = k; break; }
+  }
+  if (tstart < 0) return [{ t: 'para', lines: rest }];
+  const out = [];
+  if (tstart > 0) out.push({ t: 'para', lines: rest.slice(0, tstart) });
+  out.push(buildTable(rest.slice(tstart)));
+  return out;
 }
 
 // ---- main block parser ----
@@ -1670,10 +1680,11 @@ function parseBlocks(lines, endsWithNL) {
     if (!leaf) return;
     const node = leaf.node, par = leaf.parent;
     if (leaf.t === 'para') {
-      const fin = finalizePara(leaf, refs);
+      const fins = finalizePara(leaf, refs);
       const arr = par.children;
-      if (fin) arr[arr.length - 1] = fin;
-      else arr.pop();
+      // finalizePara returns an array (a paragraph split by a table that
+      // interrupts it yields two nodes); an empty array drops the leaf
+      arr.splice(arr.length - 1, 1, ...fins);
     } else if (leaf.t === 'html') {
       closeLeafHtml(lastIdx === undefined ? leaf.lastIdx : lastIdx, how || 'container');
     } else if (leaf.t === 'fence' && par.t === 'item' && !leaf.anchored) {
