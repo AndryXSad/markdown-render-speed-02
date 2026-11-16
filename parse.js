@@ -2314,7 +2314,10 @@ function renderBlock(nd, refs) {
         ? nd.lines.slice(0, -1) : nd.lines;
       const body = ls.join('\n');
       const cls = nd.t === 'fence' && nd.lang ? ' class="language-' + escAttr(nd.lang) + '"' : '';
-      return '<pre><code' + cls + '>' + escCode(body) + (body ? '\n' : '') + '</code></pre>\n';
+      // the trailing newline is added when there is at least one content
+      // line left, even if it is blank ([''] joins to '' but must render
+      // '\n': ```rust\n\n\n``` -> <code class="language-rust">\n</code>)
+      return '<pre><code' + cls + '>' + escCode(body) + (ls.length ? '\n' : '') + '</code></pre>\n';
     }
     case 'html':
       return nd.text;
