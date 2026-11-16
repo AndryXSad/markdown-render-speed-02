@@ -244,8 +244,10 @@ function unpairedBacktickRuns(t) {
 
 // Validate a link label's backticks: exactly one unpaired run
 // invalidates it; zero or 2+ (of different lengths) are literal.
+// A code span whose content holds a backtick ("poisoned") also
+// invalidates the label when anything follows the span.
 function linkTextOk(t) {
-  return unpairedBacktickRuns(t) !== 1;
+  return unpairedBacktickRuns(t) !== 1 && !hasPoisonedCodeSpan(t);
 }
 
 // Does the label hold a "poisoned" code span: a code span (paired run)
@@ -862,7 +864,9 @@ function assignLinkIds(nodes) {
 }
 
 // A link whose text holds >= 2 unpaired backtick runs suppresses all
-// top-level emphasis after it up to the next code span in the block.
+// top-level emphasis after it up to the LAST code span in the block
+// (a plain code span does not end the suppression; only the last one
+// does). With no code span after the link there is no suppression.
 function poisonedLinkSuppression(nodes, delims) {
   for (let a = 0; a < nodes.length; a++) {
     const nd = nodes[a];
@@ -878,7 +882,7 @@ function poisonedLinkSuppression(nodes, delims) {
     for (let k = a + 1; k < closeIdx; k++) if (nodes[k].t === 0) label += nodes[k].s;
     if (unpairedBacktickRuns(label) < 2) continue;
     let codeIdx = -1;
-    for (let k = closeIdx + 1; k < nodes.length; k++) if (nodes[k].t === 1) { codeIdx = k; break; }
+    for (let k = closeIdx + 1; k < nodes.length; k++) if (nodes[k].t === 1) codeIdx = k;
     if (codeIdx < 0) continue;
     for (let k = closeIdx + 1; k < codeIdx; k++) {
       const d = nodes[k];
@@ -1452,7 +1456,7 @@ function parseBlocks(lines, endsWithNL) {
       if (fr.t === 'quote') {
         const sv = saveCur(c2);
         curSkipWsUpTo(c2, 3);
-        if (c2.s[c2.p] === '>') { c2.p++; c2.col++; curSkipWsUpTo(c2, 1); }
+        if (c2.s[c2.p] === '>') { c2.p++; c2.col++; if (c2.s[c2.p] === ' ') { c2.p++; c2.col++; } }
         else { restoreCur(c2, sv); return null; }
       } else if (fr.t === 'item') {
         if (c2.p >= c2.s.length) return c2.s.slice(c2.p);
@@ -1496,16 +1500,18 @@ function parseBlocks(lines, endsWithNL) {
     }
     leaf = null;
   }
+  // Returns 0 (no match), 1 (matched), or 2 (matched and a tab directly
+  // follows the > — the tab then expands one column further right).
   function matchQuote(cur) {
     const sv = saveCur(cur);
     curSkipWsUpTo(cur, 3);
     if (cur.s[cur.p] === '>') {
       cur.p++; cur.col++;
-      curSkipWsUpTo(cur, 1);
-      return true;
+      if (cur.s[cur.p] === ' ') { cur.p++; cur.col++; return 1; }
+      return cur.s[cur.p] === '\t' ? 2 : 1;
     }
     restoreCur(cur, sv);
-    return false;
+    return 0;
   }
   function matchItem(cur, fr) {
     if (curBlank(cur)) { curSkipWsUpTo(cur, fr.contentIndent); return true; }
@@ -1571,6 +1577,12 @@ function parseBlocks(lines, endsWithNL) {
     // column where the innermost quote's marker region began (for the
     // nested-quote tab rule); 0 when no quote is innermost
     let quoteBase = 0;
+    // true when a tab directly follows the innermost quote's > (the tab
+    // then expands as if one column further right)
+    let quoteTab = false;
+    // true when any quote matched on the current line (quoteBase/quoteTab
+    // are only valid then; otherwise they are stale from a previous line)
+    let matchedQuote = false;
     // ---- phase 1: match containers (outermost first) ----
     let failAt = -1;
     let fenceQuoteClose = false;
@@ -1578,8 +1590,11 @@ function parseBlocks(lines, endsWithNL) {
       const fr = stack[k];
       if (fr.t === 'quote') {
         const base = cur.col;
-        if (!matchQuote(cur)) { failAt = k; break; }
+        const mq = matchQuote(cur);
+        if (!mq) { failAt = k; break; }
         quoteBase = base;
+        quoteTab = mq === 2;
+        matchedQuote = true;
       } else if (fr.t === 'item') {
         if (!matchItem(cur, fr)) { failAt = k; break; }
       }
@@ -1644,11 +1659,31 @@ function parseBlocks(lines, endsWithNL) {
                 while (n < content.length && content[n] === ' ') n++;
                 leaf.lines.push(' '.repeat(Math.max(4, n)) + content.slice(n));
               }
-            } else if (leadingWsCols(content, cur.col) >= 4) {
-              curSkipWs(cur, 4);
-              leaf.lines.push(curRest(cur));
             } else {
-              leaf.lines.push(content);
+              // Lazy line: expand leading tabs with the nested-quote
+              // rule (column counted from the innermost matched
+              // quote's base, +1 when a tab directly follows its >),
+              // then the lazy indent rule: strip 4 leading columns
+              // when the leading whitespace is >= 4.
+              const inQ = matchedQuote;
+              const baseCol = inQ ? quoteBase : 0;
+              let col = cur.col - baseCol + (inQ && quoteTab ? 1 : 0);
+              let k = 0, out = '';
+              while (k < content.length && (content[k] === ' ' || content[k] === '\t')) {
+                if (content[k] === '\t') {
+                  const sp = 4 - (col % 4);
+                  out += ' '.repeat(sp);
+                  col += sp;
+                } else {
+                  out += ' ';
+                  col++;
+                }
+                k++;
+              }
+              out += content.slice(k);
+              let lw = 0;
+              while (lw < out.length && out[lw] === ' ') lw++;
+              leaf.lines.push(lw >= 4 ? out.slice(4) : out);
             }
             leaf.lastLazy = true;
             continue;
@@ -1670,8 +1705,9 @@ function parseBlocks(lines, endsWithNL) {
       // tab is preserved.
       if (stack.length > 1) {
         const rest0 = curRest(cur);
-        const baseCol = (top().t === 'quote') ? quoteBase : 0;
-        let k = 0, col = cur.col - baseCol, out = '';
+        const inQuote = top().t === 'quote';
+        const baseCol = inQuote ? quoteBase : 0;
+        let k = 0, col = cur.col - baseCol + (inQuote && quoteTab ? 1 : 0), out = '';
         let changed = false;
         while (k < rest0.length && (rest0[k] === ' ' || rest0[k] === '\t')) {
           if (rest0[k] === '\t') {
@@ -1825,7 +1861,8 @@ function parseBlocks(lines, endsWithNL) {
         quoteBase = cur.col;
         curSkipWsUpTo(cur, 3);
         cur.p++; cur.col++;
-        curSkipWsUpTo(cur, 1);
+        if (cur.s[cur.p] === ' ') { cur.p++; cur.col++; quoteTab = false; }
+        else quoteTab = cur.s[cur.p] === '\t';
         continue;
       }
       const lm = matchListMarker(content);
