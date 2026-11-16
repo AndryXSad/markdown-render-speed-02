@@ -14,7 +14,7 @@ A dependency-free, fast Markdown renderer in a single `parse.js` (ES module, no 
 - **Inline parser** — one left-to-right scan into a flat node list (text, code span, delimiter, link open/close, image, HTML, breaks), followed by delimiter-stack emphasis resolution with the CommonMark flanking rules plus marked's link-text label rule.
 - **Renderer** — a single depth-first walk that emits the HTML byte-for-byte.
 
-It is deterministic (two runs produce byte-identical output) and uses only Node built-ins. See `BUILD.md` in the project notes for the full design write-up and the list of marked behaviours it reproduces.
+It is deterministic (two runs produce byte-identical output) and uses only Node built-ins.
 
 ## Run it
 
