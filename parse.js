@@ -711,22 +711,26 @@ function parseInline(src, refs) {
     }
     if (c === 33 && src.charCodeAt(i + 1) === 91) { // '!['
       flush();
-      const node = { k: 8, img: true, active: true, pos: i, idx: nodes.length };
+      const node = { k: 8, img: true, active: true, closed: false, pos: i, idx: nodes.length };
       nodes.push(node); openers.push(node); i += 2; continue;
     }
     if (c === 91) { // '['
       flush();
-      const node = { k: 8, img: false, active: true, pos: i, idx: nodes.length };
+      const node = { k: 8, img: false, active: true, closed: false, pos: i, idx: nodes.length };
       nodes.push(node); openers.push(node); i++; continue;
     }
     if (c === 93) { // ']'
       flush();
+      // Bracket counting: ']' matches the nearest opener not yet closed,
+      // whether active or deactivated. A deactivated opener consumes the
+      // ']' as literal text (it cannot form a link anymore).
       let oi = -1;
-      for (let q = openers.length - 1; q >= 0; q--) { if (openers[q].active) { oi = q; break; } }
+      for (let q = openers.length - 1; q >= 0; q--) { if (!openers[q].closed) { oi = q; break; } }
       if (oi === -1) { txt += ']'; i++; continue; }
       const op = openers[oi];
+      if (!op.active) { op.closed = true; txt += ']'; i++; continue; }
       const target = tryLinkTarget(src, i, op, refs);
-      if (!target) { op.active = false; txt += ']'; i++; continue; }
+      if (!target) { op.active = false; op.closed = true; txt += ']'; i++; continue; }
       const children = resolveEmphasis(nodes.slice(op.idx + 1));
       stripExtAutolinks(children);
       nodes.length = op.idx;
@@ -1390,7 +1394,15 @@ export function parse(src) {
         const ind = curIndent(cur);
         let content = curRest(cur);
         if (ind >= 4) content = curRestStrip(cur, 4);
+        // A lazy setext underline inside a quote, after a lazy line, in a
+        // paragraph of 2+ lines, gets 4 spaces prepended so it stays text.
+        if (t.lines.length >= 2 && t.lastLazy && /^[ \t]{0,3}(=+|-+)[ \t]*$/.test(content)) {
+          let inQuote = false;
+          for (let q = 1; q < stack.length; q++) if (stack[q].t === 'quote') { inQuote = true; break; }
+          if (inQuote) content = '    ' + content;
+        }
         t.lines.push(content);
+        t.lastLazy = true;
         continue;
       }
     }
@@ -1459,6 +1471,7 @@ export function parse(src) {
         let content = curRest(cur);
         if (ind >= 4 && matchedItem) content = curRestStrip(cur, 4);
         tip().lines.push(content);
+        tip().lastLazy = false;
         continue;
       }
     }
@@ -1561,7 +1574,7 @@ export function parse(src) {
         addBlock(block); stack.push(block); break;
       }
       // Paragraph
-      const para = { t: 'para', lines: [curRest(cur)] };
+      const para = { t: 'para', lines: [curRest(cur)], lastLazy: false };
       addBlock(para); stack.push(para);
       break;
     }
