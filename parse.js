@@ -1839,6 +1839,28 @@ function parseBlocks(lines, endsWithNL) {
         }
       }
       if (!fenceFall) {
+      // A fence in a quote in a list item: a plain/setext line that fails
+      // the item match ends the fence and the quote but NOT the item
+      // (marked keeps the line as bare text in the item, Q2, C3-C6).
+      // Block-start lines still pop the item (C1, C2). Applies whether
+      // the fence is anchored or not (C5).
+      let keptItem = false;
+      if (leaf && leaf.t === 'fence' && leaf.parent.t === 'quote' && !curBlank(cur)) {
+        const qIdx = stack.indexOf(leaf.parent);
+        if (qIdx > 0 && stack[qIdx - 1].t === 'item' && stack[failAt] === stack[qIdx - 1]) {
+          const rest = curRest(cur);
+          const hb = matchHtmlBlockStart(rest);
+          const blockStart = !!isHrLine(rest) || !!matchATX(rest) || !!matchFence(rest) || /^ {0,3}>/.test(rest) || !!matchListMarker(rest) || !!(hb && hb.type !== 7);
+          if (!blockStart) {
+            while (stack.length > failAt + 1) {
+              const fr = stack.pop();
+              if (leaf && leaf.parent === fr) closeLeaf(li - 1, 'container');
+            }
+            keptItem = true;
+          }
+        }
+      }
+      if (!keptItem) {
       // lazy continuation? (a list marker line inside a list item, or one
       // that continues the open list, is a new item/list, not a lazy line)
       const lazyContent = curRest(cur);
@@ -1870,6 +1892,7 @@ function parseBlocks(lines, endsWithNL) {
       while (stack.length > failAt) {
         const fr = stack.pop();
         if (leaf && leaf.parent === fr) closeLeaf(li - 1, 'container');
+      }
       }
       }
     }
